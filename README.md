@@ -22,5 +22,5 @@ cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundR
 
 db, err := gocqlx.WrapSession(cluster.CreateSession())
 // Create the event store.
-store, err := scylladb.NewEventStore(db)
+store, err := ehscylla.NewEventStore(db)
 ```
