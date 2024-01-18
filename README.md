@@ -7,7 +7,7 @@ This is an implementation of eventhorizon.EventStore for ScyllaDB.
 ## Installation
 
 ```bash
-go get ./...
+go get github.com/arceushui/eh-scylla
 ```
 
 ## Usage
