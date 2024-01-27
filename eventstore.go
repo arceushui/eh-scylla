@@ -348,13 +348,7 @@ func (s *EventStore) LoadSnapshot(ctx context.Context, id uuid.UUID) (*eh.Snapsh
 
 	q := s.db.Query(SnapshotTable.SelectBuilder(SnapshotTable.Metadata().Columns...).ToCql()).BindStruct(snapshotRecord)
 
-	if err := q.GetRelease(&snapshotRecord); err != nil {
-		return nil, &eh.EventStoreError{
-			Err:         fmt.Errorf("could not find snapshot: %w", err),
-			Op:          eh.EventStoreOpLoadSnapshot,
-			AggregateID: id,
-		}
-	}
+	q.GetRelease(&snapshotRecord)
 
 	var (
 		snapshot = new(eh.Snapshot)
