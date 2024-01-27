@@ -41,4 +41,7 @@ func TestEventStore(t *testing.T) {
 
 	t.Log("event store with other namespace")
 	testutil.AcceptanceTest(t, store, ctx)
+
+	t.Log("event store with snapshot store")
+	testutil.SnapshotAcceptanceTest(t, store, context.Background())
 }

@@ -40,17 +40,25 @@ type EventStore struct {
 var _ = eh.EventStore(&EventStore{})
 
 type AggregateEvent struct {
-	EventID       [16]byte        `db:"event_id"`
+	EventID       [16]byte         `db:"event_id"`
 	Namespace     string           `db:"namespace"`
-	AggregateID   [16]byte        `db:"aggregate_id"`
+	AggregateID   [16]byte         `db:"aggregate_id"`
 	AggregateType eh.AggregateType `db:"aggregate_type"`
 	EventType     eh.EventType     `db:"event_type"`
 	RawEventData  json.RawMessage  `db:"raw_event_data"`
 	Timestamp     time.Time        `db:"timestamp"`
 	Version       int              `db:"version"`
 	metaData      map[string]interface{}
-	data        eh.EventData
-	RawMetaData json.RawMessage `db:"raw_meta_data"`
+	data          eh.EventData
+	RawMetaData   json.RawMessage `db:"raw_meta_data"`
+}
+
+type SnapshotRecord struct {
+	AggregateID   [16]byte         `db:"aggregate_id"`
+	Timestamp     time.Time        `db:"timestamp"`
+	Version       int              `db:"version"`
+	AggregateType eh.AggregateType `db:"aggregate_type"`
+	State         []byte      `db:"state"`
 }
 
 var EventTable = table.New(table.Metadata{
@@ -65,6 +73,23 @@ var EventTable = table.New(table.Metadata{
 		"timestamp",
 		"version",
 		"raw_meta_data",
+	},
+	PartKey: []string{
+		"aggregate_id",
+	},
+	SortKey: []string{
+		"version",
+	},
+})
+
+var SnapshotTable = table.New(table.Metadata{
+	Name: "snapshots",
+	Columns: []string{
+		"aggregate_id",
+		"aggregate_type",
+		"timestamp",
+		"version",
+		"state",
 	},
 	PartKey: []string{
 		"aggregate_id",
@@ -137,7 +162,18 @@ func NewEventStore(db gocqlx.Session) (*EventStore, error) {
 				raw_meta_data blob,
 				PRIMARY KEY (aggregate_id, version)
 			) WITH CLUSTERING ORDER BY (version DESC)`)
+	if err != nil {
+		return nil, err
+	}
 
+	err = s.db.ExecStmt(`CREATE TABLE IF NOT EXISTS snapshots (
+				aggregate_id uuid,
+				aggregate_type text,
+				timestamp timestamp,
+				version int,
+				state blob,
+				PRIMARY KEY (aggregate_id, version)
+			) WITH CLUSTERING ORDER BY (version DESC)`)
 	if err != nil {
 		return nil, err
 	}
@@ -303,6 +339,100 @@ func (s *EventStore) LoadFrom(ctx context.Context, id uuid.UUID, version int) ([
 	}
 
 	return events, nil
+}
+
+func (s *EventStore) LoadSnapshot(ctx context.Context, id uuid.UUID) (*eh.Snapshot, error) {
+	snapshotRecord := SnapshotRecord{
+		AggregateID: id,
+	}
+
+	q := s.db.Query(SnapshotTable.SelectBuilder(SnapshotTable.Metadata().Columns...).ToCql()).BindStruct(snapshotRecord)
+
+	if err := q.GetRelease(&snapshotRecord); err != nil {
+		return nil, &eh.EventStoreError{
+			Err:         fmt.Errorf("could not find snapshot: %w", err),
+			Op:          eh.EventStoreOpLoadSnapshot,
+			AggregateID: id,
+		}
+	}
+
+	var (
+		snapshot = new(eh.Snapshot)
+		err      error
+	)
+
+	snapshot.State, err = eh.CreateSnapshotData(snapshotRecord.AggregateID, snapshotRecord.AggregateType)
+	if err != nil {
+		return nil, &eh.EventStoreError{
+			Err:         fmt.Errorf("could not create snapshot data: %w", err),
+			Op:          eh.EventStoreOpLoadSnapshot,
+			AggregateID: id,
+		}
+	}
+	snapshot.Version = snapshotRecord.Version
+	snapshot.Timestamp = snapshotRecord.Timestamp
+	snapshot.AggregateType = snapshotRecord.AggregateType
+	err = json.Unmarshal(snapshotRecord.State, snapshot.State)
+	if err != nil {
+		return nil, &eh.EventStoreError{
+			Err:         fmt.Errorf("could not unmarshal snapshot state: %w", err),
+			Op:          eh.EventStoreOpLoadSnapshot,
+			AggregateID: id,
+		}
+	}
+
+	return snapshot, nil
+}
+
+func (s *EventStore) SaveSnapshot(ctx context.Context, id uuid.UUID, snapshot eh.Snapshot) (err error) {
+	if snapshot.AggregateType == "" {
+		return &eh.EventStoreError{
+			Err:           fmt.Errorf("aggregate type is empty"),
+			Op:            eh.EventStoreOpSaveSnapshot,
+			AggregateID:   id,
+			AggregateType: snapshot.AggregateType,
+		}
+	}
+
+	if snapshot.State == nil {
+		return &eh.EventStoreError{
+			Err:           fmt.Errorf("snapshots state is nil"),
+			Op:            eh.EventStoreOpSaveSnapshot,
+			AggregateID:   id,
+			AggregateType: snapshot.AggregateType,
+		}
+	}
+
+	var state []byte
+	state, err = json.MarshalIndent(snapshot.State, "", "")
+	if err != nil {
+		return &eh.EventStoreError{
+			Err:           fmt.Errorf("could not marshal snapshot state: %w", err),
+			Op:            eh.EventStoreOpSaveSnapshot,
+			AggregateID:   id,
+			AggregateType: snapshot.AggregateType,
+		}
+	}
+
+	record := SnapshotRecord{
+		AggregateID:   id,
+		AggregateType: snapshot.AggregateType,
+		Timestamp:     time.Now(),
+		Version:       snapshot.Version,
+		State:         state,
+	}
+
+	q := s.db.Query(SnapshotTable.Insert()).BindStruct(record)
+	if err := q.ExecRelease(); err != nil {
+		return &eh.EventStoreError{
+			Err:           fmt.Errorf("could not save snapshot: %w", err),
+			Op:            eh.EventStoreOpSaveSnapshot,
+			AggregateID:   id,
+			AggregateType: snapshot.AggregateType,
+		}
+	}
+
+	return nil
 }
 
 func (s *EventStore) Close() error {
